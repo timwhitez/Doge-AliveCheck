@@ -1,2 +1,2 @@
 # Doge-AliveCheck
-Use icmp scan to check alive subnet.
+Use ICMP requests to check the alive subnet.
