@@ -262,15 +262,16 @@ func main() {
 		inIP,err := GetInternalIP()
 		if err != nil{
 			intSlice := strings.Split(os.Args[0],"\\")
-			fmt.Println(intSlice[len(intSlice)-1])
-			fmt.Println("无参数则根据当前网段信息进行扫描\n")
+			fmt.Println("无参数则根据当前网段信息进行扫描")
+			fmt.Println("Default Scan\n")
 
 			fmt.Println(intSlice[len(intSlice)-1]+" all")
 			fmt.Println("10.0.0.0-10.255.255.255; 172.16.0.0-172.31.255.255; 192.168.0.0-192.168.255.255\n")
 
 
 			fmt.Println(intSlice[len(intSlice)-1]+" 211.111.1.1")
-			fmt.Println("非常规内网ip默认扫b段\n")
+			fmt.Println("非常规内网ip默认扫b段")
+			fmt.Println("scan class b subnet from input ip\n")
 			return
 		}
 		fmt.Println("根据当前网段信息进行扫描...")
@@ -285,14 +286,16 @@ func main() {
 		if os.Args[1] == "-h" || os.Args[1] == "help"{
 			intSlice := strings.Split(os.Args[0],"\\")
 			fmt.Println(intSlice[len(intSlice)-1])
-			fmt.Println("无参数则根据当前网段信息进行扫描...\n")
+			fmt.Println("无参数则根据当前网段信息进行扫描")
+			fmt.Println("Default Scan\n")
 
 			fmt.Println(intSlice[len(intSlice)-1]+" all")
 			fmt.Println("10.0.0.0-10.255.255.255; 172.16.0.0-172.31.255.255; 192.168.0.0-192.168.255.255\n")
 
 
 			fmt.Println(intSlice[len(intSlice)-1]+" 211.111.1.1")
-			fmt.Println("非常规内网ip默认扫b段\n")
+			fmt.Println("非常规内网ip默认扫b段")
+			fmt.Println("scan class b subnet from input ip\n")
 			return
 		}else if os.Args[1] == "all" {
 			fmt.Println("全量常规内网扫描...")
@@ -343,14 +346,17 @@ func main() {
 	}else{
 		intSlice := strings.Split(os.Args[0],"\\")
 		fmt.Println(intSlice[len(intSlice)-1])
-		fmt.Println("无参数则根据当前网段信息进行扫描\n")
+		fmt.Println("无参数则根据当前网段信息进行扫描")
+		fmt.Println("Default Scan\n")
 
 		fmt.Println(intSlice[len(intSlice)-1]+" all")
 		fmt.Println("10.0.0.0-10.255.255.255; 172.16.0.0-172.31.255.255; 192.168.0.0-192.168.255.255\n")
 
 
 		fmt.Println(intSlice[len(intSlice)-1]+" 211.111.1.1")
-		fmt.Println("非常规内网ip默认扫b段\n")
+		fmt.Println("非常规内网ip默认扫b段")
+		fmt.Println("scan class b subnet from input ip\n")
+
 		return
 	}
 }
