@@ -1,55 +1,37 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"golang.org/x/net/icmp"
-	"log"
 	"math/rand"
 	"net"
 	"os"
-	"os/user"
+	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
-var AliveHosts []string
+var (
+	AliveHosts []string
+	OS         = runtime.GOOS
+	ExistHosts = make(map[string]struct{})
+	livewg     sync.WaitGroup
 
-var SysInfo = GetSys()
+	)
 
-type SystemInfo struct {
-	OS       string
-	HostName string
-	Groupid  string
-	Userid   string
-	Username string
-}
 
-func GetSys() SystemInfo {
-	var sysinfo SystemInfo
-
-	sysinfo.OS = runtime.GOOS
-	name, err := os.Hostname()
-	if err == nil {
-		sysinfo.HostName = name
-	} else {
-		name = "none"
+func IsContain(items []string, item string) bool {
+	for _, eachItem := range items {
+		if eachItem == item {
+			return true
+		}
 	}
-
-	u, err := user.Current()
-	if err == nil {
-		sysinfo.Groupid = u.Gid
-		sysinfo.Userid = u.Uid
-		sysinfo.Username = u.Username
-	} else {
-		sysinfo.Groupid = "1"
-		sysinfo.Userid = "1"
-		sysinfo.Username = name
-	}
-
-	return sysinfo
+	return false
 }
 
 func stringInSlice(a string, list []string) bool {
@@ -61,31 +43,12 @@ func stringInSlice(a string, list []string) bool {
 	return false
 }
 
-func IcmpCheck(hostslist []string) {
-	TmpHosts := make(map[string]struct{})
-	var chanHosts = make(chan string)
-	conn, err := icmp.ListenPacket("ip4:icmp", "0.0.0.0")
-	endflag := false
-	if err != nil {
-		log.Fatal(err)
-	}
-	go func() {
-		for {
-			if endflag == true {
-				return
-			}
-			msg := make([]byte, 100)
-			_, sourceIP, _ := conn.ReadFrom(msg)
-			if sourceIP != nil {
-				chanHosts <- sourceIP.String()
-			}
-		}
-	}()
-
+func ICMPRun(hostslist []string) []string {
+	chanHosts := make(chan string, len(hostslist))
 	go func() {
 		for ip := range chanHosts {
-			if _, ok := TmpHosts[ip]; !ok {
-				TmpHosts[ip] = struct{}{}
+			if _, ok := ExistHosts[ip]; !ok && IsContain(hostslist, ip) {
+				ExistHosts[ip] = struct{}{}
 				ip1 := strings.Split(ip,".")[0]
 				ip2 := strings.Split(ip,".")[1]
 				ip3 := strings.Split(ip,".")[2]
@@ -95,48 +58,209 @@ func IcmpCheck(hostslist []string) {
 				}
 				AliveHosts = append(AliveHosts, cidr)
 			}
+			livewg.Done()
 		}
 	}()
 
-	for _, host0 := range hostslist {
-		write(host0, conn)
-	}
-
-	if len(hostslist) > 255 {
-		time.Sleep(30 * time.Second)
+	//优先尝试监听本地icmp,批量探测
+	conn, err := icmp.ListenPacket("ip4:icmp", "0.0.0.0")
+	if err == nil {
+		RunIcmp1(hostslist, conn, chanHosts)
 	} else {
-		time.Sleep(15 * time.Second)
+		//尝试无监听icmp探测
+		conn, err := net.DialTimeout("ip4:icmp", "127.0.0.1", 3*time.Second)
+		if err == nil {
+			go conn.Close()
+			RunIcmp2(hostslist, chanHosts)
+		} else {
+			//使用ping探测
+			fmt.Println("The current user permissions unable to send icmp packets")
+			fmt.Println("start ping")
+			RunPing(hostslist, chanHosts)
+		}
 	}
 
-	endflag = true
+
+	livewg.Wait()
 	close(chanHosts)
+	return AliveHosts
+}
+
+func RunIcmp1(hostslist []string, conn *icmp.PacketConn, chanHosts chan string) {
+	endflag := false
+	go func() {
+		for {
+			if endflag == true {
+				return
+			}
+			msg := make([]byte, 100)
+			_, sourceIP, _ := conn.ReadFrom(msg)
+			if sourceIP != nil {
+				livewg.Add(1)
+				chanHosts <- sourceIP.String()
+			}
+		}
+	}()
+
+	for _, host := range hostslist {
+		dst, _ := net.ResolveIPAddr("ip", host)
+		IcmpByte := makemsg(host)
+		conn.WriteTo(IcmpByte, dst)
+	}
+	//根据hosts数量修改icmp监听时间
+	start := time.Now()
+	for {
+		if len(AliveHosts) == len(hostslist) {
+			break
+		}
+		since := time.Now().Sub(start)
+		var wait time.Duration
+		switch {
+		case len(hostslist) <= 256:
+			wait = time.Second * 3
+		default:
+			wait = time.Second * 6
+		}
+		if since > wait {
+			break
+		}
+	}
+	endflag = true
 	conn.Close()
 }
 
-func write(ip string, conn *icmp.PacketConn) {
-	dst, _ := net.ResolveIPAddr("ip", ip)
-	IcmpByte := []byte{8, 0, 247, 255, 0, 0, 0, 0}
-	conn.WriteTo(IcmpByte, dst)
+func RunIcmp2(hostslist []string, chanHosts chan string) {
+	num := 1000
+	if len(hostslist) < num {
+		num = len(hostslist)
+	}
+	var wg sync.WaitGroup
+	limiter := make(chan struct{}, num)
+	for _, host := range hostslist {
+		wg.Add(1)
+		limiter <- struct{}{}
+		go func(host string) {
+			if icmpalive(host) {
+				livewg.Add(1)
+				chanHosts <- host
+			}
+			<-limiter
+			wg.Done()
+		}(host)
+	}
+	wg.Wait()
+	close(limiter)
 }
 
+func icmpalive(host string) bool {
+	startTime := time.Now()
+	conn, err := net.DialTimeout("ip4:icmp", host, 6*time.Second)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(startTime.Add(6 * time.Second)); err != nil {
+		return false
+	}
+	msg := makemsg(host)
+	if _, err := conn.Write(msg); err != nil {
+		return false
+	}
 
-func ICMPRun(hostslist []string) []string {
-	if SysInfo.OS == "windows" {
-		IcmpCheck(hostslist)
-	} else if SysInfo.OS == "linux" {
-		if SysInfo.Groupid == "0" || SysInfo.Userid == "0" || SysInfo.Username == "root" {
-				IcmpCheck(hostslist)
+	receive := make([]byte, 60)
+	if _, err := conn.Read(receive); err != nil {
+		return false
+	}
+
+	return true
+}
+
+func RunPing(hostslist []string, chanHosts chan string) {
+	var bsenv = ""
+	if OS != "windows" {
+		bsenv = "/bin/bash"
+	}
+	var wg sync.WaitGroup
+	limiter := make(chan struct{}, 50)
+	for _, host := range hostslist {
+		wg.Add(1)
+		limiter <- struct{}{}
+		go func(host string) {
+			if ExecCommandPing(host, bsenv) {
+				livewg.Add(1)
+				chanHosts <- host
+			}
+			<-limiter
+			wg.Done()
+		}(host)
+	}
+	wg.Wait()
+}
+
+func ExecCommandPing(ip string, bsenv string) bool {
+	var command *exec.Cmd
+	if OS == "windows" {
+		command = exec.Command("cmd", "/c", "ping -n 1 -w 1 "+ip+" && echo true || echo false") //ping -c 1 -i 0.5 -t 4 -W 2 -w 5 "+ip+" >/dev/null && echo true || echo false"
+	} else if OS == "linux" {
+		command = exec.Command(bsenv, "-c", "ping -c 1 -w 1 "+ip+" >/dev/null && echo true || echo false") //ping -c 1 -i 0.5 -t 4 -W 2 -w 5 "+ip+" >/dev/null && echo true || echo false"
+	} else if OS == "darwin" {
+		command = exec.Command(bsenv, "-c", "ping -c 1 -W 1 "+ip+" >/dev/null && echo true || echo false") //ping -c 1 -i 0.5 -t 4 -W 2 -w 5 "+ip+" >/dev/null && echo true || echo false"
+	}
+	outinfo := bytes.Buffer{}
+	command.Stdout = &outinfo
+	err := command.Start()
+	if err != nil {
+		return false
+	}
+	if err = command.Wait(); err != nil {
+		return false
+	} else {
+		if strings.Contains(outinfo.String(), "true") {
+			return true
 		} else {
-			fmt.Println("The current user permissions unable to send icmp packets")
-		}
-	} else if SysInfo.OS == "darwin" {
-		if SysInfo.Groupid == "0" || SysInfo.Userid == "0" || SysInfo.Username == "root" {
-				IcmpCheck(hostslist)
-		} else {
-			fmt.Println("The current user permissions unable to send icmp packets")
+			return false
 		}
 	}
-	return AliveHosts
+}
+
+func makemsg(host string) []byte {
+	msg := make([]byte, 40)
+	id0, id1 := genIdentifier(host)
+	msg[0] = 8
+	msg[1] = 0
+	msg[2] = 0
+	msg[3] = 0
+	msg[4], msg[5] = id0, id1
+	msg[6], msg[7] = genSequence(1)
+	check := checkSum(msg[0:40])
+	msg[2] = byte(check >> 8)
+	msg[3] = byte(check & 255)
+	return msg
+}
+
+func checkSum(msg []byte) uint16 {
+	sum := 0
+	length := len(msg)
+	for i := 0; i < length-1; i += 2 {
+		sum += int(msg[i])*256 + int(msg[i+1])
+	}
+	if length%2 == 1 {
+		sum += int(msg[length-1]) * 256
+	}
+	sum = (sum >> 16) + (sum & 0xffff)
+	sum = sum + (sum >> 16)
+	answer := uint16(^sum)
+	return answer
+}
+
+func genSequence(v int16) (byte, byte) {
+	ret1 := byte(v >> 8)
+	ret2 := byte(v & 255)
+	return ret1, ret2
+}
+
+func genIdentifier(host string) (byte, byte) {
+	return host[0], host[1]
 }
 
 var ParseIPErr = errors.New(" ip parsing error\n" +
